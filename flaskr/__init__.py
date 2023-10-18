@@ -29,6 +29,7 @@ def create_app(test_config=None):
                 return (
                     jsonify(
                         {
+                            "success": False,
                             "status": 422,
                             "message": "Unprocessable. Please provide a text to summarize",
                         }
@@ -62,6 +63,7 @@ def create_app(test_config=None):
             return (
                 jsonify(
                     {
+                        "success": False,
                         "status": 422,
                         "message": "Unprocessable. Please provide a text and a query.",
                     }
@@ -87,33 +89,35 @@ def create_app(test_config=None):
 
     @app.errorhandler(404)
     def not_found(error):
-        return jsonify({"status": 404, "message": "Not found."}), 404
+        return jsonify({"success": False, "status": 404, "message": "Not found."}), 404
 
     @app.errorhandler(400)
     def bad_request(error):
         return (
-            jsonify({"status": 400, "message": "Bad Request."}),
+            jsonify({"success": False, "status": 400, "message": "Bad Request."}),
             400,
         )
 
     @app.errorhandler(500)
     def server_error(error):
         return (
-            jsonify({"status": 500, "message": "Server error."}),
+            jsonify({"success": False, "status": 500, "message": "Server error."}),
             500,
         )
 
     @app.errorhandler(422)
     def unprocessable(error):
         return (
-            jsonify({"status": 422, "message": "Unprocessable."}),
+            jsonify({"success": False, "status": 422, "message": "Unprocessable."}),
             422,
         )
 
     @app.errorhandler(405)
     def method_not_allowed(error):
         return (
-            jsonify({"status": 405, "message": "Method not allowed."}),
+            jsonify(
+                {"success": False, "status": 405, "message": "Method not allowed."}
+            ),
             405,
         )
 

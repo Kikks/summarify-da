@@ -1,1 +1,2 @@
 python-3.10.5
+gunicorn=21.2.0

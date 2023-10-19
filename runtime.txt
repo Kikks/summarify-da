@@ -1,2 +1,1 @@
 python-3.10.5
-gunicorn=20.1.0

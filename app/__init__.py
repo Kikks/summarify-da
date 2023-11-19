@@ -1,15 +1,19 @@
 import os
-import PyPDF2
-import docx
-import csv
-import openpyxl
-import openai
+import redis
+
 from flask import Flask, request, abort, jsonify
 from flask_cors import CORS
+from rq import Worker, Queue, Connection
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+from utils.extractor import extract_file
+from utils.openai_chat import generate_summary, query_document
+from utils.jobs import summarize_and_update_document
+from worker import conn
+
+# Start Configurations
 UPLOAD_FOLDER = "uploads"
 ALLOWED_EXTENSIONS = {"pdf", "txt", "csv", "doc", "docx"}
+# End Configurations
 
 
 def create_app(test_config=None):
@@ -20,6 +24,8 @@ def create_app(test_config=None):
 
     if not os.path.exists(UPLOAD_FOLDER):
         os.makedirs(UPLOAD_FOLDER)
+
+    queue = Queue(connection=conn)
 
     # CORS Headers
     @app.after_request
@@ -32,6 +38,7 @@ def create_app(test_config=None):
         )
         return response
 
+    # Start of Routes
     @app.route("/summarize", methods=["POST"])
     def summarize_text():
         try:
@@ -50,30 +57,14 @@ def create_app(test_config=None):
                     422,
                 )
 
-            # TODO: Pass the text variable to the model and return the summary
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a helpful assistant that summarizes text.",
-                    },
-                    {"role": "user", "content": text},
-                ],
-                temperature=1,
-                max_tokens=300,
-                top_p=1,
-                frequency_penalty=2,
-                presence_penalty=2,
-            )
+            summary = generate_summary(text)
 
             return jsonify(
                 {
                     "success": True,
                     "message": "Summary generated successfully.",
                     "data": {
-                        # TODO: Return the summary
-                        "summary": response["choices"][0]["message"]["content"],
+                        "summary": summary,
                     },
                 }
             )
@@ -100,66 +91,55 @@ def create_app(test_config=None):
                     422,
                 )
 
-            # TODO: Pass the text and query variables to the model and return the answer
-            prompt = f'You are a helpful assistant that answers questions based on the words from the text below.\nText: """\n{text}\n"""'
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": query},
-                ],
-                temperature=1,
-                max_tokens=256,
-                top_p=1,
-                frequency_penalty=0,
-                presence_penalty=0,
-            )
+            reply = query_document(text, query)
 
             return jsonify(
                 {
                     "success": True,
                     "message": "Text queried successfully.",
-                    "data": {
-                        # TODO: Return the answer to the query
-                        "reply": response["choices"][0]["message"]["content"],
-                    },
+                    "data": {"reply": reply},
                 }
             )
         except Exception as error:
             print(error)
             abort(500)
 
-    def allowed_file(filename):
-        return (
-            "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-        )
+    @app.route("/summarize-job", methods=["POST"])
+    def create_summary_job():
+        body = request.get_json()
+        document_id = body.get("documentId", None)
+        text = body.get("text", None)
+        user_id = body.get("userId", None)
 
-    def extract_text_from_pdf(pdf_path):
-        text = ""
-        with open(pdf_path, "rb") as pdf_file:
-            pdf_reader = PyPDF2.PdfFileReader(pdf_file)
-            for page_num in range(pdf_reader.numPages):
-                page = pdf_reader.getPage(page_num)
-                text += page.extractText()
-        return text
+        if not text or not document_id or not user_id:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "status": 422,
+                        "message": "Unprocessable. Please provide a text, a document ID and a user ID.",
+                    }
+                ),
+                422,
+            )
 
-    def extract_text_from_docx(docx_path):
-        doc = docx.Document(docx_path)
-        text = ""
-        for paragraph in doc.paragraphs:
-            text += paragraph.text
-        return text
-
-    def extract_text_from_csv(csv_path):
-        with open(csv_path, "r", encoding="utf-8") as csv_file:
-            csv_reader = csv.reader(csv_file)
-            text = "\n".join(",".join(row) for row in csv_reader)
-        return text
-
-    def extract_text_from_txt(txt_path):
-        with open(txt_path, "r", encoding="utf-8") as txt_file:
-            text = txt_file.read()
-        return text
+        try:
+            queue.enqueue(
+                summarize_and_update_document,
+                {"document_id": document_id, "text": text, "user_id": user_id},
+            )
+            return jsonify(
+                {
+                    "success": True,
+                    "message": "Summary generated successfully.",
+                    "data": {
+                        "queued": True,
+                    },
+                }
+            )
+        except Exception as error:
+            print(error)
+            abort(500)
 
     @app.route("/upload", methods=["POST"])
     def upload_file():
@@ -176,21 +156,11 @@ def create_app(test_config=None):
 
             try:
                 file.save(file_path)
-
-                if file.filename.endswith(".pdf"):
-                    text = extract_text_from_pdf(file_path)
-                elif file.filename.endswith(".docx"):
-                    text = extract_text_from_docx(file_path)
-                elif file.filename.endswith(".csv"):
-                    text = extract_text_from_csv(file_path)
-                elif file.filename.endswith((".txt", ".log")):
-                    text = extract_text_from_txt(file_path)
-                else:
-                    text = "Unsupported file format"
+                text = extract_file(file.filename, file_path)
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
             finally:
-                os.remove(file_path)  # Delete the file after use (success or error)
+                os.remove(file_path)
 
             return jsonify({"text": text}), 200
 
@@ -201,6 +171,9 @@ def create_app(test_config=None):
             422,
         )
 
+    # End of Routes
+
+    # Start of Error Handlers
     @app.errorhandler(404)
     def not_found(error):
         return jsonify({"success": False, "status": 404, "message": "Not found."}), 404
@@ -234,5 +207,7 @@ def create_app(test_config=None):
             ),
             405,
         )
+
+    # End of Error Handlers
 
     return app

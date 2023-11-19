@@ -176,3 +176,7 @@ cython_debug/
 #.idea/
 
 /uploads
+
+# Redis
+redis.rdb
+dump.rdb
